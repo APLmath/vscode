@@ -3,12 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IStatusbarService, StatusbarAlignment as MainThreadStatusBarAlignment, IStatusbarEntryAccessor } from 'vs/platform/statusbar/common/statusbar';
+import { IStatusbarService, StatusbarAlignment as MainThreadStatusBarAlignment, IStatusbarEntryAccessor, IStatusbarEntry } from 'vs/workbench/services/statusbar/common/statusbar';
 import { MainThreadStatusBarShape, MainContext, IExtHostContext } from '../common/extHost.protocol';
 import { ThemeColor } from 'vs/platform/theme/common/themeService';
 import { extHostNamedCustomer } from 'vs/workbench/api/common/extHostCustomers';
-import { ExtensionIdentifier } from 'vs/platform/extensions/common/extensions';
 import { dispose } from 'vs/base/common/lifecycle';
+import { Command } from 'vs/editor/common/modes';
 
 @extHostNamedCustomer(MainContext.MainThreadStatusBar)
 export class MainThreadStatusBar implements MainThreadStatusBarShape {
@@ -25,8 +25,14 @@ export class MainThreadStatusBar implements MainThreadStatusBarShape {
 		this.entries.clear();
 	}
 
-	$setEntry(id: number, extensionId: ExtensionIdentifier, text: string, tooltip: string, command: string, color: string | ThemeColor, alignment: MainThreadStatusBarAlignment, priority: number): void {
-		const entry = { text, tooltip, command, color, extensionId };
+	$setEntry(id: number, statusId: string, statusName: string, text: string, tooltip: string | undefined, command: Command | undefined, color: string | ThemeColor | undefined, alignment: MainThreadStatusBarAlignment, priority: number | undefined): void {
+		// if there are icons in the text use the tooltip for the aria label
+		const ariaLabel = text.indexOf('$(') === -1 ? text : tooltip || text;
+		const entry: IStatusbarEntry = { text, tooltip, command, color, ariaLabel };
+
+		if (typeof priority === 'undefined') {
+			priority = 0;
+		}
 
 		// Reset existing entry if alignment or priority changed
 		let existingEntry = this.entries.get(id);
@@ -38,7 +44,7 @@ export class MainThreadStatusBar implements MainThreadStatusBarShape {
 
 		// Create new entry if not existing
 		if (!existingEntry) {
-			this.entries.set(id, { accessor: this.statusbarService.addEntry(entry, alignment, priority), alignment, priority });
+			this.entries.set(id, { accessor: this.statusbarService.addEntry(entry, statusId, statusName, alignment, priority), alignment, priority });
 		}
 
 		// Otherwise update

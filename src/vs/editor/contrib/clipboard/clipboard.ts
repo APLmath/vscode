@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./clipboard';
 import * as nls from 'vs/nls';
 import * as browser from 'vs/base/browser/browser';
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
@@ -16,13 +15,14 @@ import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
 import { MenuId } from 'vs/platform/actions/common/actions';
 import { ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 
 const CLIPBOARD_CONTEXT_MENU_GROUP = '9_cutcopypaste';
 
 const supportsCut = (platform.isNative || document.queryCommandSupported('cut'));
 const supportsCopy = (platform.isNative || document.queryCommandSupported('copy'));
 // IE and Edge have trouble with setting html content in clipboard
-const supportsCopyWithSyntaxHighlighting = (supportsCopy && !browser.isEdgeOrIE);
+const supportsCopyWithSyntaxHighlighting = (supportsCopy && !browser.isEdge);
 // Chrome incorrectly returns true for document.queryCommandSupported('paste')
 // when the paste feature is available but the calling script has insufficient
 // privileges to actually perform the action
@@ -59,7 +59,7 @@ abstract class ExecCommandAction extends EditorAction {
 class ExecCommandCutAction extends ExecCommandAction {
 
 	constructor() {
-		let kbOpts: ICommandKeybindingsOptions | null = {
+		let kbOpts: ICommandKeybindingsOptions | undefined = {
 			kbExpr: EditorContextKeys.textInputFocus,
 			primary: KeyMod.CtrlCmd | KeyCode.KEY_X,
 			win: { primary: KeyMod.CtrlCmd | KeyCode.KEY_X, secondary: [KeyMod.Shift | KeyCode.Delete] },
@@ -68,7 +68,7 @@ class ExecCommandCutAction extends ExecCommandAction {
 		// Do not bind cut keybindings in the browser,
 		// since browsers do that for us and it avoids security prompts
 		if (!platform.isNative) {
-			kbOpts = null;
+			kbOpts = undefined;
 		}
 		super('cut', {
 			id: 'editor.action.clipboardCutAction',
@@ -76,11 +76,11 @@ class ExecCommandCutAction extends ExecCommandAction {
 			alias: 'Cut',
 			precondition: EditorContextKeys.writable,
 			kbOpts: kbOpts,
-			menuOpts: {
+			contextMenuOpts: {
 				group: CLIPBOARD_CONTEXT_MENU_GROUP,
 				order: 1
 			},
-			menubarOpts: {
+			menuOpts: {
 				menuId: MenuId.MenubarEditMenu,
 				group: '2_ccp',
 				title: nls.localize({ key: 'miCut', comment: ['&& denotes a mnemonic'] }, "Cu&&t"),
@@ -94,7 +94,7 @@ class ExecCommandCutAction extends ExecCommandAction {
 			return;
 		}
 
-		const emptySelectionClipboard = editor.getConfiguration().emptySelectionClipboard;
+		const emptySelectionClipboard = editor.getOption(EditorOption.emptySelectionClipboard);
 
 		if (!emptySelectionClipboard && editor.getSelection().isEmpty()) {
 			return;
@@ -107,7 +107,7 @@ class ExecCommandCutAction extends ExecCommandAction {
 class ExecCommandCopyAction extends ExecCommandAction {
 
 	constructor() {
-		let kbOpts: ICommandKeybindingsOptions | null = {
+		let kbOpts: ICommandKeybindingsOptions | undefined = {
 			kbExpr: EditorContextKeys.textInputFocus,
 			primary: KeyMod.CtrlCmd | KeyCode.KEY_C,
 			win: { primary: KeyMod.CtrlCmd | KeyCode.KEY_C, secondary: [KeyMod.CtrlCmd | KeyCode.Insert] },
@@ -116,20 +116,20 @@ class ExecCommandCopyAction extends ExecCommandAction {
 		// Do not bind copy keybindings in the browser,
 		// since browsers do that for us and it avoids security prompts
 		if (!platform.isNative) {
-			kbOpts = null;
+			kbOpts = undefined;
 		}
 
 		super('copy', {
 			id: 'editor.action.clipboardCopyAction',
 			label: nls.localize('actions.clipboard.copyLabel', "Copy"),
 			alias: 'Copy',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: kbOpts,
-			menuOpts: {
+			contextMenuOpts: {
 				group: CLIPBOARD_CONTEXT_MENU_GROUP,
 				order: 2
 			},
-			menubarOpts: {
+			menuOpts: {
 				menuId: MenuId.MenubarEditMenu,
 				group: '2_ccp',
 				title: nls.localize({ key: 'miCopy', comment: ['&& denotes a mnemonic'] }, "&&Copy"),
@@ -143,16 +143,10 @@ class ExecCommandCopyAction extends ExecCommandAction {
 			return;
 		}
 
-		const emptySelectionClipboard = editor.getConfiguration().emptySelectionClipboard;
+		const emptySelectionClipboard = editor.getOption(EditorOption.emptySelectionClipboard);
 
 		if (!emptySelectionClipboard && editor.getSelection().isEmpty()) {
 			return;
-		}
-		// Prevent copying an empty line by accident
-		if (editor.getSelections().length === 1 && editor.getSelection().isEmpty()) {
-			if (editor.getModel().getLineFirstNonWhitespaceColumn(editor.getSelection().positionLineNumber) === 0) {
-				return;
-			}
 		}
 
 		super.run(accessor, editor);
@@ -162,16 +156,17 @@ class ExecCommandCopyAction extends ExecCommandAction {
 class ExecCommandPasteAction extends ExecCommandAction {
 
 	constructor() {
-		let kbOpts: ICommandKeybindingsOptions | null = {
+		let kbOpts: ICommandKeybindingsOptions | undefined = {
 			kbExpr: EditorContextKeys.textInputFocus,
 			primary: KeyMod.CtrlCmd | KeyCode.KEY_V,
 			win: { primary: KeyMod.CtrlCmd | KeyCode.KEY_V, secondary: [KeyMod.Shift | KeyCode.Insert] },
+			linux: { primary: KeyMod.CtrlCmd | KeyCode.KEY_V, secondary: [KeyMod.Shift | KeyCode.Insert] },
 			weight: KeybindingWeight.EditorContrib
 		};
 		// Do not bind paste keybindings in the browser,
 		// since browsers do that for us and it avoids security prompts
 		if (!platform.isNative) {
-			kbOpts = null;
+			kbOpts = undefined;
 		}
 
 		super('paste', {
@@ -180,11 +175,11 @@ class ExecCommandPasteAction extends ExecCommandAction {
 			alias: 'Paste',
 			precondition: EditorContextKeys.writable,
 			kbOpts: kbOpts,
-			menuOpts: {
+			contextMenuOpts: {
 				group: CLIPBOARD_CONTEXT_MENU_GROUP,
 				order: 3
 			},
-			menubarOpts: {
+			menuOpts: {
 				menuId: MenuId.MenubarEditMenu,
 				group: '2_ccp',
 				title: nls.localize({ key: 'miPaste', comment: ['&& denotes a mnemonic'] }, "&&Paste"),
@@ -201,7 +196,7 @@ class ExecCommandCopyWithSyntaxHighlightingAction extends ExecCommandAction {
 			id: 'editor.action.clipboardCopyWithSyntaxHighlightingAction',
 			label: nls.localize('actions.clipboard.copyWithSyntaxHighlightingLabel', "Copy With Syntax Highlighting"),
 			alias: 'Copy With Syntax Highlighting',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: 0,
@@ -215,7 +210,7 @@ class ExecCommandCopyWithSyntaxHighlightingAction extends ExecCommandAction {
 			return;
 		}
 
-		const emptySelectionClipboard = editor.getConfiguration().emptySelectionClipboard;
+		const emptySelectionClipboard = editor.getOption(EditorOption.emptySelectionClipboard);
 
 		if (!emptySelectionClipboard && editor.getSelection().isEmpty()) {
 			return;

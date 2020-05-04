@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import * as Proto from '../protocol';
+import type * as Proto from '../protocol';
 import { ITypeScriptServiceClient } from '../typescriptService';
 import API from '../utils/api';
 import { VersionDependentRegistration } from '../utils/dependentRegistration';
@@ -27,7 +27,7 @@ class SmartSelection implements vscode.SelectionRangeProvider {
 			return undefined;
 		}
 
-		const args: Proto.FileRequestArgs & { locations: Proto.Location[] } = {
+		const args: Proto.SelectionRangeRequestArgs = {
 			file,
 			locations: positions.map(typeConverters.Position.toLocation)
 		};

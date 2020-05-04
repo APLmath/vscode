@@ -5,15 +5,18 @@
 
 import * as nls from 'vs/nls';
 import * as Types from 'vs/base/common/types';
+import * as resources from 'vs/base/common/resources';
 import { IJSONSchemaMap } from 'vs/base/common/jsonSchema';
 import * as Objects from 'vs/base/common/objects';
-import { UriComponents } from 'vs/base/common/uri';
+import { UriComponents, URI } from 'vs/base/common/uri';
 
 import { ProblemMatcher } from 'vs/workbench/contrib/tasks/common/problemMatcher';
-import { IWorkspaceFolder } from 'vs/platform/workspace/common/workspace';
+import { IWorkspaceFolder, IWorkspace } from 'vs/platform/workspace/common/workspace';
 import { RawContextKey } from 'vs/platform/contextkey/common/contextkey';
 import { TaskDefinitionRegistry } from 'vs/workbench/contrib/tasks/common/taskDefinitionRegistry';
 import { IExtensionDescription } from 'vs/platform/extensions/common/extensions';
+import { ConfigurationTarget } from 'vs/platform/configuration/common/configuration';
+import { USER_TASKS_GROUP_KEY } from 'vs/workbench/contrib/tasks/common/taskService';
 
 export const TASK_RUNNING_STATE = new RawContextKey<boolean>('taskRunning', false);
 
@@ -228,7 +231,7 @@ export interface PresentationOptions {
 	 * Controls whether the problems pane is revealed when running this task or not.
 	 * Defaults to `RevealProblemKind.Never`.
 	 */
-	revealProblem: RevealProblemKind;
+	revealProblems: RevealProblemKind;
 
 	/**
 	 * Controls whether the command associated with the task is echoed
@@ -266,7 +269,7 @@ export interface PresentationOptions {
 
 export namespace PresentationOptions {
 	export const defaults: PresentationOptions = {
-		echo: true, reveal: RevealKind.Always, revealProblem: RevealProblemKind.Never, focus: false, panel: PanelKind.Shared, showReuseMessage: true, clear: false
+		echo: true, reveal: RevealKind.Always, revealProblems: RevealProblemKind.Never, focus: false, panel: PanelKind.Shared, showReuseMessage: true, clear: false
 	};
 }
 
@@ -374,10 +377,21 @@ export namespace TaskSourceKind {
 	export const Workspace: 'workspace' = 'workspace';
 	export const Extension: 'extension' = 'extension';
 	export const InMemory: 'inMemory' = 'inMemory';
+	export const WorkspaceFile: 'workspaceFile' = 'workspaceFile';
+	export const User: 'user' = 'user';
+
+	export function toConfigurationTarget(kind: string): ConfigurationTarget {
+		switch (kind) {
+			case TaskSourceKind.User: return ConfigurationTarget.USER;
+			case TaskSourceKind.WorkspaceFile: return ConfigurationTarget.WORKSPACE;
+			default: return ConfigurationTarget.WORKSPACE_FOLDER;
+		}
+	}
 }
 
 export interface TaskSourceConfigElement {
-	workspaceFolder: IWorkspaceFolder;
+	workspaceFolder?: IWorkspaceFolder;
+	workspace?: IWorkspace;
 	file: string;
 	index: number;
 	element: any;
@@ -410,8 +424,20 @@ export interface InMemoryTaskSource extends BaseTaskSource {
 	readonly kind: 'inMemory';
 }
 
-export type TaskSource = WorkspaceTaskSource | ExtensionTaskSource | InMemoryTaskSource;
+export interface UserTaskSource extends BaseTaskSource {
+	readonly kind: 'user';
+	readonly config: TaskSourceConfigElement;
+	readonly customizes?: KeyedTaskIdentifier;
+}
 
+export interface WorkspaceFileTaskSource extends BaseTaskSource {
+	readonly kind: 'workspaceFile';
+	readonly config: TaskSourceConfigElement;
+	readonly customizes?: KeyedTaskIdentifier;
+}
+
+export type TaskSource = WorkspaceTaskSource | ExtensionTaskSource | InMemoryTaskSource | UserTaskSource | WorkspaceFileTaskSource;
+export type FileBasedTaskSource = WorkspaceTaskSource | UserTaskSource | WorkspaceFileTaskSource;
 export interface TaskIdentifier {
 	type: string;
 	[name: string]: any;
@@ -422,13 +448,18 @@ export interface KeyedTaskIdentifier extends TaskIdentifier {
 }
 
 export interface TaskDependency {
-	workspaceFolder: IWorkspaceFolder;
+	uri: URI | string;
 	task: string | KeyedTaskIdentifier | undefined;
 }
 
 export const enum GroupType {
 	default = 'default',
 	user = 'user'
+}
+
+export const enum DependsOrder {
+	parallel = 'parallel',
+	sequence = 'sequence'
 }
 
 export interface ConfigurationProperties {
@@ -479,6 +510,16 @@ export interface ConfigurationProperties {
 	dependsOn?: TaskDependency[];
 
 	/**
+	 * The order the dependsOn tasks should be executed in.
+	 */
+	dependsOrder?: DependsOrder;
+
+	/**
+	 * A description of the task.
+	 */
+	detail?: string;
+
+	/**
 	 * The problem watchers to use for this task
 	 */
 	problemMatchers?: Array<string | ProblemMatcher>;
@@ -492,10 +533,11 @@ export enum RunOnOptions {
 export interface RunOptions {
 	reevaluateOnRerun?: boolean;
 	runOn?: RunOnOptions;
+	instanceLimit?: number;
 }
 
 export namespace RunOptions {
-	export const defaults: RunOptions = { reevaluateOnRerun: true, runOn: RunOnOptions.default };
+	export const defaults: RunOptions = { reevaluateOnRerun: true, runOn: RunOnOptions.default, instanceLimit: 1 };
 }
 
 export abstract class CommonTask {
@@ -508,7 +550,7 @@ export abstract class CommonTask {
 	/**
 	 * The cached label.
 	 */
-	_label: string;
+	_label: string = '';
 
 	type?: string;
 
@@ -546,6 +588,18 @@ export abstract class CommonTask {
 		return undefined;
 	}
 
+	protected abstract getFolderId(): string | undefined;
+
+	public getCommonTaskId(): string {
+		interface RecentTaskKey {
+			folder: string | undefined;
+			id: string;
+		}
+
+		const key: RecentTaskKey = { folder: this.getFolderId(), id: this._id };
+		return JSON.stringify(key);
+	}
+
 	public clone(): Task {
 		return this.fromObject(Objects.assign({}, <any>this));
 	}
@@ -553,6 +607,10 @@ export abstract class CommonTask {
 	protected abstract fromObject(object: any): Task;
 
 	public getWorkspaceFolder(): IWorkspaceFolder | undefined {
+		return undefined;
+	}
+
+	public getWorkspaceFileName(): string | undefined {
 		return undefined;
 	}
 
@@ -604,21 +662,23 @@ export abstract class CommonTask {
 
 export class CustomTask extends CommonTask {
 
-	type: '$customized'; // CUSTOMIZED_TASK_TYPE
+	type!: '$customized'; // CUSTOMIZED_TASK_TYPE
+
+	instance: number | undefined;
 
 	/**
-	 * Indicated the source of the task (e.g tasks.json or extension)
+	 * Indicated the source of the task (e.g. tasks.json or extension)
 	 */
-	_source: WorkspaceTaskSource;
+	_source: FileBasedTaskSource;
 
 	hasDefinedMatchers: boolean;
 
 	/**
 	 * The command configuration
 	 */
-	command: CommandConfiguration;
+	command: CommandConfiguration = {};
 
-	public constructor(id: string, source: WorkspaceTaskSource, label: string, type: string, command: CommandConfiguration | undefined,
+	public constructor(id: string, source: FileBasedTaskSource, label: string, type: string, command: CommandConfiguration | undefined,
 		hasDefinedMatchers: boolean, runOptions: RunOptions, configurationProperties: ConfigurationProperties) {
 		super(id, label, undefined, runOptions, configurationProperties, source);
 		this._source = source;
@@ -677,7 +737,15 @@ export class CustomTask extends CommonTask {
 
 	public getMapKey(): string {
 		let workspaceFolder = this._source.config.workspaceFolder;
-		return workspaceFolder ? `${workspaceFolder.uri.toString()}|${this._id}` : this._id;
+		return workspaceFolder ? `${workspaceFolder.uri.toString()}|${this._id}|${this.instance}` : `${this._id}|${this.instance}`;
+	}
+
+	protected getFolderId(): string | undefined {
+		return this._source.kind === TaskSourceKind.User ? USER_TASKS_GROUP_KEY : this._source.config.workspaceFolder?.uri.toString();
+	}
+
+	public getCommonTaskId(): string {
+		return this._source.customizes ? super.getCommonTaskId() : (this.getRecentlyUsedKey() ?? super.getCommonTaskId());
 	}
 
 	public getRecentlyUsedKey(): string | undefined {
@@ -686,16 +754,24 @@ export class CustomTask extends CommonTask {
 			folder: string;
 			id: string;
 		}
-		let workspaceFolder = this._source.config.workspaceFolder;
+		let workspaceFolder = this.getFolderId();
 		if (!workspaceFolder) {
 			return undefined;
 		}
-		let key: CustomKey = { type: CUSTOMIZED_TASK_TYPE, folder: workspaceFolder.uri.toString(), id: this.configurationProperties.identifier! };
+		let id: string = this.configurationProperties.identifier!;
+		if (this._source.kind !== TaskSourceKind.Workspace) {
+			id += this._source.kind;
+		}
+		let key: CustomKey = { type: CUSTOMIZED_TASK_TYPE, folder: workspaceFolder, id };
 		return JSON.stringify(key);
 	}
 
-	public getWorkspaceFolder(): IWorkspaceFolder {
+	public getWorkspaceFolder(): IWorkspaceFolder | undefined {
 		return this._source.config.workspaceFolder;
+	}
+
+	public getWorkspaceFileName(): string | undefined {
+		return (this._source.config.workspace && this._source.config.workspace.configuration) ? resources.basename(this._source.config.workspace.configuration) : undefined;
 	}
 
 	public getTelemetryKind(): string {
@@ -714,13 +790,13 @@ export class CustomTask extends CommonTask {
 export class ConfiguringTask extends CommonTask {
 
 	/**
-	 * Indicated the source of the task (e.g tasks.json or extension)
+	 * Indicated the source of the task (e.g. tasks.json or extension)
 	 */
-	_source: WorkspaceTaskSource;
+	_source: FileBasedTaskSource;
 
 	configures: KeyedTaskIdentifier;
 
-	public constructor(id: string, source: WorkspaceTaskSource, label: string | undefined, type: string | undefined,
+	public constructor(id: string, source: FileBasedTaskSource, label: string | undefined, type: string | undefined,
 		configures: KeyedTaskIdentifier, runOptions: RunOptions, configurationProperties: ConfigurationProperties) {
 		super(id, label, type, runOptions, configurationProperties, source);
 		this._source = source;
@@ -735,14 +811,50 @@ export class ConfiguringTask extends CommonTask {
 		return object;
 	}
 
+	public getDefinition(): KeyedTaskIdentifier {
+		return this.configures;
+	}
+
+	public getWorkspaceFileName(): string | undefined {
+		return (this._source.config.workspace && this._source.config.workspace.configuration) ? resources.basename(this._source.config.workspace.configuration) : undefined;
+	}
+
+	public getWorkspaceFolder(): IWorkspaceFolder | undefined {
+		return this._source.config.workspaceFolder;
+	}
+
+	protected getFolderId(): string | undefined {
+		return this._source.kind === TaskSourceKind.User ? USER_TASKS_GROUP_KEY : this._source.config.workspaceFolder?.uri.toString();
+	}
+
+	public getRecentlyUsedKey(): string | undefined {
+		interface CustomKey {
+			type: string;
+			folder: string;
+			id: string;
+		}
+		let workspaceFolder = this.getFolderId();
+		if (!workspaceFolder) {
+			return undefined;
+		}
+		let id: string = this.configurationProperties.identifier!;
+		if (this._source.kind !== TaskSourceKind.Workspace) {
+			id += this._source.kind;
+		}
+		let key: CustomKey = { type: CUSTOMIZED_TASK_TYPE, folder: workspaceFolder, id };
+		return JSON.stringify(key);
+	}
 }
 
 export class ContributedTask extends CommonTask {
 
 	/**
-	 * Indicated the source of the task (e.g tasks.json or extension)
+	 * Indicated the source of the task (e.g. tasks.json or extension)
+	 * Set in the super constructor
 	 */
-	_source: ExtensionTaskSource;
+	_source!: ExtensionTaskSource;
+
+	instance: number | undefined;
 
 	defines: KeyedTaskIdentifier;
 
@@ -773,8 +885,15 @@ export class ContributedTask extends CommonTask {
 	public getMapKey(): string {
 		let workspaceFolder = this._source.workspaceFolder;
 		return workspaceFolder
-			? `${this._source.scope.toString()}|${workspaceFolder.uri.toString()}|${this._id}`
-			: `${this._source.scope.toString()}|${this._id}`;
+			? `${this._source.scope.toString()}|${workspaceFolder.uri.toString()}|${this._id}|${this.instance}`
+			: `${this._source.scope.toString()}|${this._id}|${this.instance}`;
+	}
+
+	protected getFolderId(): string | undefined {
+		if (this._source.scope === TaskScope.Folder && this._source.workspaceFolder) {
+			return this._source.workspaceFolder.uri.toString();
+		}
+		return undefined;
 	}
 
 	public getRecentlyUsedKey(): string | undefined {
@@ -786,9 +905,7 @@ export class ContributedTask extends CommonTask {
 		}
 
 		let key: ContributedKey = { type: 'contributed', scope: this._source.scope, id: this._id };
-		if (this._source.scope === TaskScope.Folder && this._source.workspaceFolder) {
-			key.folder = this._source.workspaceFolder.uri.toString();
-		}
+		key.folder = this.getFolderId();
 		return JSON.stringify(key);
 	}
 
@@ -807,11 +924,13 @@ export class ContributedTask extends CommonTask {
 
 export class InMemoryTask extends CommonTask {
 	/**
-	 * Indicated the source of the task (e.g tasks.json or extension)
+	 * Indicated the source of the task (e.g. tasks.json or extension)
 	 */
 	_source: InMemoryTaskSource;
 
-	type: 'inMemory';
+	instance: number | undefined;
+
+	type!: 'inMemory';
 
 	public constructor(id: string, source: InMemoryTaskSource, label: string, type: string,
 		runOptions: RunOptions, configurationProperties: ConfigurationProperties) {
@@ -825,6 +944,14 @@ export class InMemoryTask extends CommonTask {
 
 	public getTelemetryKind(): string {
 		return 'composite';
+	}
+
+	public getMapKey(): string {
+		return `${this._id}|${this.instance}`;
+	}
+
+	protected getFolderId(): undefined {
+		return undefined;
 	}
 
 	protected fromObject(object: InMemoryTask): InMemoryTask {
@@ -875,7 +1002,7 @@ export class TaskSorter {
 		}
 	}
 
-	public compare(a: Task, b: Task): number {
+	public compare(a: Task | ConfiguringTask, b: Task | ConfiguringTask): number {
 		let aw = a.getWorkspaceFolder();
 		let bw = b.getWorkspaceFolder();
 		if (aw && bw) {
@@ -971,14 +1098,14 @@ export namespace KeyedTaskIdentifier {
 	function sortedStringify(literal: any): string {
 		const keys = Object.keys(literal).sort();
 		let result: string = '';
-		for (let position in keys) {
-			let stringified = literal[keys[position]];
+		for (const key of keys) {
+			let stringified = literal[key];
 			if (stringified instanceof Object) {
 				stringified = sortedStringify(stringified);
 			} else if (typeof stringified === 'string') {
 				stringified = stringified.replace(/,/g, ',,');
 			}
-			result += keys[position] + ',' + stringified + ',';
+			result += key + ',' + stringified + ',';
 		}
 		return result;
 	}

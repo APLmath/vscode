@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import * as Proto from '../protocol';
+import type * as Proto from '../protocol';
 import { ITypeScriptServiceClient } from '../typescriptService';
 import API from '../utils/api';
 import { ConditionalRegistration, ConfigurationDependentRegistration, VersionDependentRegistration } from '../utils/dependentRegistration';
@@ -46,7 +46,7 @@ class TagClosing extends Disposable {
 
 	private onDidChangeTextDocument(
 		document: vscode.TextDocument,
-		changes: vscode.TextDocumentContentChangeEvent[]
+		changes: readonly vscode.TextDocumentContentChangeEvent[]
 	) {
 		const activeDocument = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
 		if (document !== activeDocument || changes.length === 0) {

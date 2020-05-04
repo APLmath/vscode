@@ -11,6 +11,7 @@ import { IEditorModel } from 'vs/platform/editor/common/editor';
  * and the modified version.
  */
 export class DiffEditorModel extends EditorModel {
+
 	protected readonly _originalModel: IEditorModel | null;
 	protected readonly _modifiedModel: IEditorModel | null;
 
@@ -22,26 +23,20 @@ export class DiffEditorModel extends EditorModel {
 	}
 
 	get originalModel(): IEditorModel | null {
-		if (!this._originalModel) {
-			return null;
-		}
-
 		return this._originalModel;
 	}
 
 	get modifiedModel(): IEditorModel | null {
-		if (!this._modifiedModel) {
-			return null;
-		}
-
 		return this._modifiedModel;
 	}
 
-	load(): Promise<EditorModel> {
-		return Promise.all([
-			this._originalModel ? this._originalModel.load() : Promise.resolve(undefined),
-			this._modifiedModel ? this._modifiedModel.load() : Promise.resolve(undefined),
-		]).then(() => this);
+	async load(): Promise<EditorModel> {
+		await Promise.all([
+			this._originalModel?.load(),
+			this._modifiedModel?.load(),
+		]);
+
+		return this;
 	}
 
 	isResolved(): boolean {

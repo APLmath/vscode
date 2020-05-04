@@ -3,39 +3,35 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { localize } from 'vs/nls';
 import { sep } from 'vs/base/common/path';
 import { URI } from 'vs/base/common/uri';
 import * as glob from 'vs/base/common/glob';
-import { isLinux } from 'vs/base/common/platform';
-import { createDecorator, ServiceIdentifier } from 'vs/platform/instantiation/common/instantiation';
+import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
 import { Event } from 'vs/base/common/event';
 import { startsWithIgnoreCase } from 'vs/base/common/strings';
 import { IDisposable } from 'vs/base/common/lifecycle';
 import { isEqualOrParent, isEqual } from 'vs/base/common/resources';
 import { isUndefinedOrNull } from 'vs/base/common/types';
-import { VSBuffer, VSBufferReadable } from 'vs/base/common/buffer';
+import { VSBuffer, VSBufferReadable, VSBufferReadableStream } from 'vs/base/common/buffer';
+import { ReadableStreamEvents } from 'vs/base/common/stream';
+import { CancellationToken } from 'vs/base/common/cancellation';
 
 export const IFileService = createDecorator<IFileService>('fileService');
 
-export interface IResourceEncodings {
-	getWriteEncoding(resource: URI, preferredEncoding?: string): IResourceEncoding;
-}
-
-export interface IResourceEncoding {
-	encoding: string;
-	hasBOM: boolean;
-}
-
 export interface IFileService {
 
-	_serviceBrand: ServiceIdentifier<any>;
-
-	//#region File System Provider
+	_serviceBrand: undefined;
 
 	/**
 	 * An event that is fired when a file system provider is added or removed
 	 */
 	readonly onDidChangeFileSystemProviderRegistrations: Event<IFileSystemProviderRegistrationEvent>;
+
+	/**
+	 * An even that is fired when a registered file system provider changes it's capabilities.
+	 */
+	readonly onDidChangeFileSystemProviderCapabilities: Event<IFileSystemProviderCapabilitiesChangeEvent>;
 
 	/**
 	 * An event that is fired when a file system provider is about to be activated. Listeners
@@ -63,23 +59,16 @@ export interface IFileService {
 	 */
 	hasCapability(resource: URI, capability: FileSystemProviderCapabilities): boolean;
 
-	//#endregion
-
-	/**
-	 * Helper to determine read/write encoding for resources.
-	 */
-	encoding: IResourceEncodings;
-
 	/**
 	 * Allows to listen for file changes. The event will fire for every file within the opened workspace
 	 * (if any) as well as all files that have been watched explicitly using the #watch() API.
 	 */
-	readonly onFileChanges: Event<FileChangesEvent>;
+	readonly onDidFilesChange: Event<FileChangesEvent>;
 
 	/**
 	 * An event that is fired upon successful completion of a certain file operation.
 	 */
-	readonly onAfterOperation: Event<FileOperationEvent>;
+	readonly onDidRunOperation: Event<FileOperationEvent>;
 
 	/**
 	 * Resolve the properties of a file/folder identified by the resource.
@@ -111,23 +100,19 @@ export interface IFileService {
 	exists(resource: URI): Promise<boolean>;
 
 	/**
-	 * Resolve the contents of a file identified by the resource.
-	 *
-	 * The returned object contains properties of the file and the full value as string.
+	 * Read the contents of the provided resource unbuffered.
 	 */
-	resolveContent(resource: URI, options?: IResolveContentOptions): Promise<IContent>;
+	readFile(resource: URI, options?: IReadFileOptions): Promise<IFileContent>;
 
 	/**
-	 * Resolve the contents of a file identified by the resource.
-	 *
-	 * The returned object contains properties of the file and the value as a readable stream.
+	 * Read the contents of the provided resource buffered as stream.
 	 */
-	resolveStreamContent(resource: URI, options?: IResolveContentOptions): Promise<IStreamContent>;
+	readFileStream(resource: URI, options?: IReadFileOptions): Promise<IFileStreamContent>;
 
 	/**
 	 * Updates the content replacing its previous value.
 	 */
-	writeFile(resource: URI, bufferOrReadable: VSBuffer | VSBufferReadable, options?: IWriteFileOptions): Promise<IFileStatWithMetadata>;
+	writeFile(resource: URI, bufferOrReadableOrStream: VSBuffer | VSBufferReadable | VSBufferReadableStream, options?: IWriteFileOptions): Promise<IFileStatWithMetadata>;
 
 	/**
 	 * Moves the file/folder to a new path identified by the resource.
@@ -149,7 +134,7 @@ export interface IFileService {
 	 *
 	 * The optional parameter content can be used as value to fill into the new file.
 	 */
-	createFile(resource: URI, bufferOrReadable?: VSBuffer | VSBufferReadable, options?: ICreateFileOptions): Promise<IFileStatWithMetadata>;
+	createFile(resource: URI, bufferOrReadableOrStream?: VSBuffer | VSBufferReadable | VSBufferReadableStream, options?: ICreateFileOptions): Promise<IFileStatWithMetadata>;
 
 	/**
 	 * Creates a new folder with the given path. The returned promise
@@ -181,6 +166,29 @@ export interface FileOverwriteOptions {
 	overwrite: boolean;
 }
 
+export interface FileReadStreamOptions {
+
+	/**
+	 * Is an integer specifying where to begin reading from in the file. If position is undefined,
+	 * data will be read from the current file position.
+	 */
+	readonly position?: number;
+
+	/**
+	 * Is an integer specifying how many bytes to read from the file. By default, all bytes
+	 * will be read.
+	 */
+	readonly length?: number;
+
+	/**
+	 * If provided, the size of the file will be checked against the limits.
+	 */
+	limits?: {
+		readonly size?: number;
+		readonly memory?: number;
+	};
+}
+
 export interface FileWriteOptions {
 	overwrite: boolean;
 	create: boolean;
@@ -204,8 +212,17 @@ export enum FileType {
 
 export interface IStat {
 	type: FileType;
+
+	/**
+	 * The last modification date represented as millis from unix epoch.
+	 */
 	mtime: number;
+
+	/**
+	 * The creation date represented as millis from unix epoch.
+	 */
 	ctime: number;
+
 	size: number;
 }
 
@@ -217,6 +234,8 @@ export interface IWatchOptions {
 export const enum FileSystemProviderCapabilities {
 	FileReadWrite = 1 << 1,
 	FileOpenReadWriteClose = 1 << 2,
+	FileReadStream = 1 << 4,
+
 	FileFolderCopy = 1 << 3,
 
 	PathCaseSensitive = 1 << 10,
@@ -228,11 +247,11 @@ export const enum FileSystemProviderCapabilities {
 export interface IFileSystemProvider {
 
 	readonly capabilities: FileSystemProviderCapabilities;
-	onDidChangeCapabilities: Event<void>;
+	readonly onDidChangeCapabilities: Event<void>;
 
-	onDidErrorOccur?: Event<Error>; // TODO@ben remove once file watchers are solid
+	readonly onDidErrorOccur?: Event<string>; // TODO@ben remove once file watchers are solid
 
-	onDidChangeFile: Event<IFileChange[]>;
+	readonly onDidChangeFile: Event<readonly IFileChange[]>;
 	watch(resource: URI, opts: IWatchOptions): IDisposable;
 
 	stat(resource: URI): Promise<IStat>;
@@ -245,6 +264,8 @@ export interface IFileSystemProvider {
 
 	readFile?(resource: URI): Promise<Uint8Array>;
 	writeFile?(resource: URI, content: Uint8Array, opts: FileWriteOptions): Promise<void>;
+
+	readFileStream?(resource: URI, opts: FileReadStreamOptions, token?: CancellationToken): ReadableStreamEvents<Uint8Array>;
 
 	open?(resource: URI, opts: FileOpenOptions): Promise<number>;
 	close?(fd: number): Promise<void>;
@@ -280,11 +301,21 @@ export function hasOpenReadWriteCloseCapability(provider: IFileSystemProvider): 
 	return !!(provider.capabilities & FileSystemProviderCapabilities.FileOpenReadWriteClose);
 }
 
+export interface IFileSystemProviderWithFileReadStreamCapability extends IFileSystemProvider {
+	readFileStream(resource: URI, opts: FileReadStreamOptions, token?: CancellationToken): ReadableStreamEvents<Uint8Array>;
+}
+
+export function hasFileReadStreamCapability(provider: IFileSystemProvider): provider is IFileSystemProviderWithFileReadStreamCapability {
+	return !!(provider.capabilities & FileSystemProviderCapabilities.FileReadStream);
+}
+
 export enum FileSystemProviderErrorCode {
 	FileExists = 'EntryExists',
 	FileNotFound = 'EntryNotFound',
 	FileNotADirectory = 'EntryNotADirectory',
 	FileIsADirectory = 'EntryIsADirectory',
+	FileExceedsMemoryLimit = 'EntryExceedsMemoryLimit',
+	FileTooLarge = 'EntryTooLarge',
 	NoPermissions = 'NoPermissions',
 	Unavailable = 'Unavailable',
 	Unknown = 'Unknown'
@@ -297,11 +328,19 @@ export class FileSystemProviderError extends Error {
 	}
 }
 
-export function createFileSystemProviderError(error: Error, code: FileSystemProviderErrorCode): FileSystemProviderError {
+export function createFileSystemProviderError(error: Error | string, code: FileSystemProviderErrorCode): FileSystemProviderError {
 	const providerError = new FileSystemProviderError(error.toString(), code);
 	markAsFileSystemProviderError(providerError, code);
 
 	return providerError;
+}
+
+export function ensureFileSystemProviderError(error?: Error): Error {
+	if (!error) {
+		return createFileSystemProviderError(localize('unknownError', "Unknown Error"), FileSystemProviderErrorCode.Unknown); // https://github.com/Microsoft/vscode/issues/72798
+	}
+
+	return error;
 }
 
 export function markAsFileSystemProviderError(error: Error, code: FileSystemProviderErrorCode): Error {
@@ -310,7 +349,12 @@ export function markAsFileSystemProviderError(error: Error, code: FileSystemProv
 	return error;
 }
 
-export function toFileSystemProviderErrorCode(error: Error): FileSystemProviderErrorCode {
+export function toFileSystemProviderErrorCode(error: Error | undefined | null): FileSystemProviderErrorCode {
+
+	// Guard against abuse
+	if (!error) {
+		return FileSystemProviderErrorCode.Unknown;
+	}
 
 	// FileSystemProviderError comes with the code
 	if (error instanceof FileSystemProviderError) {
@@ -329,6 +373,8 @@ export function toFileSystemProviderErrorCode(error: Error): FileSystemProviderE
 		case FileSystemProviderErrorCode.FileIsADirectory: return FileSystemProviderErrorCode.FileIsADirectory;
 		case FileSystemProviderErrorCode.FileNotADirectory: return FileSystemProviderErrorCode.FileNotADirectory;
 		case FileSystemProviderErrorCode.FileNotFound: return FileSystemProviderErrorCode.FileNotFound;
+		case FileSystemProviderErrorCode.FileExceedsMemoryLimit: return FileSystemProviderErrorCode.FileExceedsMemoryLimit;
+		case FileSystemProviderErrorCode.FileTooLarge: return FileSystemProviderErrorCode.FileTooLarge;
 		case FileSystemProviderErrorCode.NoPermissions: return FileSystemProviderErrorCode.NoPermissions;
 		case FileSystemProviderErrorCode.Unavailable: return FileSystemProviderErrorCode.Unavailable;
 	}
@@ -337,16 +383,28 @@ export function toFileSystemProviderErrorCode(error: Error): FileSystemProviderE
 }
 
 export function toFileOperationResult(error: Error): FileOperationResult {
+
+	// FileSystemProviderError comes with the result already
+	if (error instanceof FileOperationError) {
+		return error.fileOperationResult;
+	}
+
+	// Otherwise try to find from code
 	switch (toFileSystemProviderErrorCode(error)) {
 		case FileSystemProviderErrorCode.FileNotFound:
 			return FileOperationResult.FILE_NOT_FOUND;
 		case FileSystemProviderErrorCode.FileIsADirectory:
 			return FileOperationResult.FILE_IS_DIRECTORY;
+		case FileSystemProviderErrorCode.FileNotADirectory:
+			return FileOperationResult.FILE_NOT_DIRECTORY;
 		case FileSystemProviderErrorCode.NoPermissions:
 			return FileOperationResult.FILE_PERMISSION_DENIED;
 		case FileSystemProviderErrorCode.FileExists:
 			return FileOperationResult.FILE_MOVE_CONFLICT;
-		case FileSystemProviderErrorCode.FileNotADirectory:
+		case FileSystemProviderErrorCode.FileExceedsMemoryLimit:
+			return FileOperationResult.FILE_EXCEEDS_MEMORY_LIMIT;
+		case FileSystemProviderErrorCode.FileTooLarge:
+			return FileOperationResult.FILE_TOO_LARGE;
 		default:
 			return FileOperationResult.FILE_OTHER_ERROR;
 	}
@@ -356,6 +414,11 @@ export interface IFileSystemProviderRegistrationEvent {
 	added: boolean;
 	scheme: string;
 	provider?: IFileSystemProvider;
+}
+
+export interface IFileSystemProviderCapabilitiesChangeEvent {
+	provider: IFileSystemProvider;
+	scheme: string;
 }
 
 export interface IFileSystemProviderActivationEvent {
@@ -400,25 +463,17 @@ export interface IFileChange {
 	/**
 	 * The type of change that occurred to the file.
 	 */
-	type: FileChangeType;
+	readonly type: FileChangeType;
 
 	/**
 	 * The unified resource identifier of the file that changed.
 	 */
-	resource: URI;
+	readonly resource: URI;
 }
 
 export class FileChangesEvent {
 
-	private _changes: IFileChange[];
-
-	constructor(changes: IFileChange[]) {
-		this._changes = changes;
-	}
-
-	get changes() {
-		return this._changes;
-	}
+	constructor(public readonly changes: readonly IFileChange[]) { }
 
 	/**
 	 * Returns true if this change event contains the provided file with the given change type (if provided). In case of
@@ -432,17 +487,17 @@ export class FileChangesEvent {
 
 		const checkForChangeType = !isUndefinedOrNull(type);
 
-		return this._changes.some(change => {
+		return this.changes.some(change => {
 			if (checkForChangeType && change.type !== type) {
 				return false;
 			}
 
 			// For deleted also return true when deleted folder is parent of target path
 			if (change.type === FileChangeType.DELETED) {
-				return isEqualOrParent(resource, change.resource, !isLinux /* ignorecase */);
+				return isEqualOrParent(resource, change.resource);
 			}
 
-			return isEqual(resource, change.resource, !isLinux /* ignorecase */);
+			return isEqual(resource, change.resource);
 		});
 	}
 
@@ -489,11 +544,11 @@ export class FileChangesEvent {
 	}
 
 	private getOfType(type: FileChangeType): IFileChange[] {
-		return this._changes.filter(change => change.type === type);
+		return this.changes.filter(change => change.type === type);
 	}
 
 	private hasType(type: FileChangeType): boolean {
-		return this._changes.some(change => {
+		return this.changes.some(change => {
 			return change.type === type;
 		});
 	}
@@ -527,7 +582,7 @@ interface IBaseStat {
 	resource: URI;
 
 	/**
-	 * The name which is the last segement
+	 * The name which is the last segment
 	 * of the {{path}}.
 	 */
 	name: string;
@@ -541,13 +596,20 @@ interface IBaseStat {
 	size?: number;
 
 	/**
-	 * The last modifictaion date represented
-	 * as millis from unix epoch.
+	 * The last modification date represented as millis from unix epoch.
 	 *
 	 * The value may or may not be resolved as
 	 * it is optional.
 	 */
 	mtime?: number;
+
+	/**
+	 * The creation date represented as millis from unix epoch.
+	 *
+	 * The value may or may not be resolved as
+	 * it is optional.
+	 */
+	ctime?: number;
 
 	/**
 	 * A unique identifier thet represents the
@@ -557,15 +619,11 @@ interface IBaseStat {
 	 * it is optional.
 	 */
 	etag?: string;
-
-	/**
-	 * The resource is readonly.
-	 */
-	isReadonly?: boolean;
 }
 
 export interface IBaseStatWithMetadata extends IBaseStat {
 	mtime: number;
+	ctime: number;
 	etag: string;
 	size: number;
 }
@@ -576,15 +634,19 @@ export interface IBaseStatWithMetadata extends IBaseStat {
 export interface IFileStat extends IBaseStat {
 
 	/**
-	 * The resource is a directory. if {{true}}
-	 * {{encoding}} has no meaning.
+	 * The resource is a file.
+	 */
+	isFile: boolean;
+
+	/**
+	 * The resource is a directory.
 	 */
 	isDirectory: boolean;
 
 	/**
 	 * The resource is a symbolic link.
 	 */
-	isSymbolicLink?: boolean;
+	isSymbolicLink: boolean;
 
 	/**
 	 * The children of the file stat or undefined if none.
@@ -594,6 +656,7 @@ export interface IFileStat extends IBaseStat {
 
 export interface IFileStatWithMetadata extends IFileStat, IBaseStatWithMetadata {
 	mtime: number;
+	ctime: number;
 	etag: string;
 	size: number;
 	children?: IFileStatWithMetadata[];
@@ -608,147 +671,23 @@ export interface IResolveFileResultWithMetadata extends IResolveFileResult {
 	stat?: IFileStatWithMetadata;
 }
 
-/**
- * Content and meta information of a file.
- */
-export interface IContent extends IBaseStatWithMetadata {
+export interface IFileContent extends IBaseStatWithMetadata {
 
 	/**
-	 * The content of a text file.
+	 * The content of a file as buffer.
 	 */
-	value: string;
+	value: VSBuffer;
+}
+
+export interface IFileStreamContent extends IBaseStatWithMetadata {
 
 	/**
-	 * The encoding of the content if known.
+	 * The content of a file as stream.
 	 */
-	encoding: string;
+	value: VSBufferReadableStream;
 }
 
-// this should eventually replace IContent such
-// that we have a clear separation between content
-// and metadata (TODO@Joh, TODO@Ben)
-export interface IContentData {
-	encoding: string;
-	stream: IStringStream;
-}
-
-/**
- * A Stream emitting strings.
- */
-export interface IStringStream {
-	on(event: 'data', callback: (chunk: string) => void): void;
-	on(event: 'error', callback: (err: any) => void): void;
-	on(event: 'end', callback: () => void): void;
-	on(event: string, callback: any): void;
-}
-
-/**
- * Text snapshot that works like an iterator.
- * Will try to return chunks of roughly ~64KB size.
- * Will return null when finished.
- */
-export interface ITextSnapshot {
-	read(): string | null;
-}
-
-/**
- * Helper method to convert a snapshot into its full string form.
- */
-export function snapshotToString(snapshot: ITextSnapshot): string {
-	const chunks: string[] = [];
-
-	let chunk: string | null;
-	while (typeof (chunk = snapshot.read()) === 'string') {
-		chunks.push(chunk);
-	}
-
-	return chunks.join('');
-}
-
-export function stringToSnapshot(value: string): ITextSnapshot {
-	let done = false;
-
-	return {
-		read(): string | null {
-			if (!done) {
-				done = true;
-
-				return value;
-			}
-
-			return null;
-		}
-	};
-}
-
-export class TextSnapshotReadable implements VSBufferReadable {
-	private preambleHandled: boolean;
-
-	constructor(private snapshot: ITextSnapshot, private preamble?: string) { }
-
-	read(): VSBuffer | null {
-		let value = this.snapshot.read();
-
-		// Handle preamble if provided
-		if (!this.preambleHandled) {
-			this.preambleHandled = true;
-
-			if (typeof this.preamble === 'string') {
-				if (typeof value === 'string') {
-					value = this.preamble + value;
-				} else {
-					value = this.preamble;
-				}
-			}
-		}
-
-		if (typeof value === 'string') {
-			return VSBuffer.fromString(value);
-		}
-
-		return null;
-	}
-}
-
-export function toBufferOrReadable(value: string): VSBuffer;
-export function toBufferOrReadable(value: ITextSnapshot): VSBufferReadable;
-export function toBufferOrReadable(value: string | ITextSnapshot): VSBuffer | VSBufferReadable;
-export function toBufferOrReadable(value: string | ITextSnapshot | undefined): VSBuffer | VSBufferReadable | undefined;
-export function toBufferOrReadable(value: string | ITextSnapshot | undefined): VSBuffer | VSBufferReadable | undefined {
-	if (typeof value === 'undefined') {
-		return undefined;
-	}
-
-	if (typeof value === 'string') {
-		return VSBuffer.fromString(value);
-	}
-
-	return new TextSnapshotReadable(value);
-}
-
-/**
- * Streamable content and meta information of a file.
- */
-export interface IStreamContent extends IBaseStatWithMetadata {
-
-	/**
-	 * The streamable content of a text file.
-	 */
-	value: IStringStream;
-
-	/**
-	 * The encoding of the content if known.
-	 */
-	encoding: string;
-}
-
-export interface IResolveContentOptions {
-
-	/**
-	 * The optional acceptTextOnly parameter allows to fail this request early if the file
-	 * contents are not textual.
-	 */
-	acceptTextOnly?: boolean;
+export interface IReadFileOptions extends FileReadStreamOptions {
 
 	/**
 	 * The optional etag parameter allows to return early from resolving the resource if
@@ -756,24 +695,7 @@ export interface IResolveContentOptions {
 	 * that have been read already with the same etag.
 	 * It is the task of the caller to makes sure to handle this error case from the promise.
 	 */
-	etag?: string;
-
-	/**
-	 * The optional encoding parameter allows to specify the desired encoding when resolving
-	 * the contents of the file.
-	 */
-	encoding?: string;
-
-	/**
-	 * The optional guessEncoding parameter allows to guess encoding from content of the file.
-	 */
-	autoGuessEncoding?: boolean;
-
-	/**
-	 * Is an integer specifying where to begin reading from in the file. If position is null,
-	 * data will be read from the current file position.
-	 */
-	position?: number;
+	readonly etag?: string;
 }
 
 export interface IWriteFileOptions {
@@ -781,36 +703,12 @@ export interface IWriteFileOptions {
 	/**
 	 * The last known modification time of the file. This can be used to prevent dirty writes.
 	 */
-	mtime?: number;
+	readonly mtime?: number;
 
 	/**
 	 * The etag of the file. This can be used to prevent dirty writes.
 	 */
-	etag?: string;
-}
-
-export interface IWriteTextFileOptions extends IWriteFileOptions {
-
-	/**
-	 * The encoding to use when updating a file.
-	 */
-	encoding?: string;
-
-	/**
-	 * If set to true, will enforce the selected encoding and not perform any detection using BOMs.
-	 */
-	overwriteEncoding?: boolean;
-
-	/**
-	 * Whether to overwrite a file even if it is readonly.
-	 */
-	overwriteReadonly?: boolean;
-
-	/**
-	 * Wether to write to the file as elevated (admin) user. When setting this option a prompt will
-	 * ask the user to authenticate as super user.
-	 */
-	writeElevated?: boolean;
+	readonly etag?: string;
 }
 
 export interface IResolveFileOptions {
@@ -819,22 +717,22 @@ export interface IResolveFileOptions {
 	 * Automatically continue resolving children of a directory until the provided resources
 	 * are found.
 	 */
-	resolveTo?: URI[];
+	readonly resolveTo?: readonly URI[];
 
 	/**
 	 * Automatically continue resolving children of a directory if the number of children is 1.
 	 */
-	resolveSingleChildDescendants?: boolean;
+	readonly resolveSingleChildDescendants?: boolean;
 
 	/**
-	 * Will resolve mtime, size and etag of files if enabled. This can have a negative impact
+	 * Will resolve mtime, ctime, size and etag of files if enabled. This can have a negative impact
 	 * on performance and thus should only be used when these values are required.
 	 */
-	resolveMetadata?: boolean;
+	readonly resolveMetadata?: boolean;
 }
 
 export interface IResolveMetadataFileOptions extends IResolveFileOptions {
-	resolveMetadata: true;
+	readonly resolveMetadata: true;
 }
 
 export interface ICreateFileOptions {
@@ -843,11 +741,11 @@ export interface ICreateFileOptions {
 	 * Overwrite the file to create if it already exists on disk. Otherwise
 	 * an error will be thrown (FILE_MODIFIED_SINCE).
 	 */
-	overwrite?: boolean;
+	readonly overwrite?: boolean;
 }
 
 export class FileOperationError extends Error {
-	constructor(message: string, public fileOperationResult: FileOperationResult, public options?: IResolveContentOptions & IWriteTextFileOptions & ICreateFileOptions) {
+	constructor(message: string, public fileOperationResult: FileOperationResult, public options?: IReadFileOptions & IWriteFileOptions & ICreateFileOptions) {
 		super(message);
 	}
 
@@ -857,7 +755,6 @@ export class FileOperationError extends Error {
 }
 
 export const enum FileOperationResult {
-	FILE_IS_BINARY,
 	FILE_IS_DIRECTORY,
 	FILE_NOT_FOUND,
 	FILE_NOT_MODIFIED_SINCE,
@@ -867,7 +764,8 @@ export const enum FileOperationResult {
 	FILE_PERMISSION_DENIED,
 	FILE_TOO_LARGE,
 	FILE_INVALID_PATH,
-	FILE_EXCEED_MEMORY_LIMIT,
+	FILE_EXCEEDS_MEMORY_LIMIT,
+	FILE_NOT_DIRECTORY,
 	FILE_OTHER_ERROR
 }
 
@@ -883,8 +781,6 @@ export const HotExitConfiguration = {
 	ON_EXIT: 'onExit',
 	ON_EXIT_AND_WINDOW_CLOSE: 'onExitAndWindowClose'
 };
-
-export const CONTENT_CHANGE_EVENT_BUFFER_DELAY = 1000;
 
 export const FILES_ASSOCIATIONS_CONFIG = 'files.associations';
 export const FILES_EXCLUDE_CONFIG = 'files.exclude';
@@ -903,249 +799,9 @@ export interface IFilesConfiguration {
 		eol: string;
 		enableTrash: boolean;
 		hotExit: string;
+		saveConflictResolution: 'askUser' | 'overwriteFileOnDisk';
 	};
 }
-
-export const SUPPORTED_ENCODINGS: { [encoding: string]: { labelLong: string; labelShort: string; order: number; encodeOnly?: boolean; alias?: string } } = {
-	utf8: {
-		labelLong: 'UTF-8',
-		labelShort: 'UTF-8',
-		order: 1,
-		alias: 'utf8bom'
-	},
-	utf8bom: {
-		labelLong: 'UTF-8 with BOM',
-		labelShort: 'UTF-8 with BOM',
-		encodeOnly: true,
-		order: 2,
-		alias: 'utf8'
-	},
-	utf16le: {
-		labelLong: 'UTF-16 LE',
-		labelShort: 'UTF-16 LE',
-		order: 3
-	},
-	utf16be: {
-		labelLong: 'UTF-16 BE',
-		labelShort: 'UTF-16 BE',
-		order: 4
-	},
-	windows1252: {
-		labelLong: 'Western (Windows 1252)',
-		labelShort: 'Windows 1252',
-		order: 5
-	},
-	iso88591: {
-		labelLong: 'Western (ISO 8859-1)',
-		labelShort: 'ISO 8859-1',
-		order: 6
-	},
-	iso88593: {
-		labelLong: 'Western (ISO 8859-3)',
-		labelShort: 'ISO 8859-3',
-		order: 7
-	},
-	iso885915: {
-		labelLong: 'Western (ISO 8859-15)',
-		labelShort: 'ISO 8859-15',
-		order: 8
-	},
-	macroman: {
-		labelLong: 'Western (Mac Roman)',
-		labelShort: 'Mac Roman',
-		order: 9
-	},
-	cp437: {
-		labelLong: 'DOS (CP 437)',
-		labelShort: 'CP437',
-		order: 10
-	},
-	windows1256: {
-		labelLong: 'Arabic (Windows 1256)',
-		labelShort: 'Windows 1256',
-		order: 11
-	},
-	iso88596: {
-		labelLong: 'Arabic (ISO 8859-6)',
-		labelShort: 'ISO 8859-6',
-		order: 12
-	},
-	windows1257: {
-		labelLong: 'Baltic (Windows 1257)',
-		labelShort: 'Windows 1257',
-		order: 13
-	},
-	iso88594: {
-		labelLong: 'Baltic (ISO 8859-4)',
-		labelShort: 'ISO 8859-4',
-		order: 14
-	},
-	iso885914: {
-		labelLong: 'Celtic (ISO 8859-14)',
-		labelShort: 'ISO 8859-14',
-		order: 15
-	},
-	windows1250: {
-		labelLong: 'Central European (Windows 1250)',
-		labelShort: 'Windows 1250',
-		order: 16
-	},
-	iso88592: {
-		labelLong: 'Central European (ISO 8859-2)',
-		labelShort: 'ISO 8859-2',
-		order: 17
-	},
-	cp852: {
-		labelLong: 'Central European (CP 852)',
-		labelShort: 'CP 852',
-		order: 18
-	},
-	windows1251: {
-		labelLong: 'Cyrillic (Windows 1251)',
-		labelShort: 'Windows 1251',
-		order: 19
-	},
-	cp866: {
-		labelLong: 'Cyrillic (CP 866)',
-		labelShort: 'CP 866',
-		order: 20
-	},
-	iso88595: {
-		labelLong: 'Cyrillic (ISO 8859-5)',
-		labelShort: 'ISO 8859-5',
-		order: 21
-	},
-	koi8r: {
-		labelLong: 'Cyrillic (KOI8-R)',
-		labelShort: 'KOI8-R',
-		order: 22
-	},
-	koi8u: {
-		labelLong: 'Cyrillic (KOI8-U)',
-		labelShort: 'KOI8-U',
-		order: 23
-	},
-	iso885913: {
-		labelLong: 'Estonian (ISO 8859-13)',
-		labelShort: 'ISO 8859-13',
-		order: 24
-	},
-	windows1253: {
-		labelLong: 'Greek (Windows 1253)',
-		labelShort: 'Windows 1253',
-		order: 25
-	},
-	iso88597: {
-		labelLong: 'Greek (ISO 8859-7)',
-		labelShort: 'ISO 8859-7',
-		order: 26
-	},
-	windows1255: {
-		labelLong: 'Hebrew (Windows 1255)',
-		labelShort: 'Windows 1255',
-		order: 27
-	},
-	iso88598: {
-		labelLong: 'Hebrew (ISO 8859-8)',
-		labelShort: 'ISO 8859-8',
-		order: 28
-	},
-	iso885910: {
-		labelLong: 'Nordic (ISO 8859-10)',
-		labelShort: 'ISO 8859-10',
-		order: 29
-	},
-	iso885916: {
-		labelLong: 'Romanian (ISO 8859-16)',
-		labelShort: 'ISO 8859-16',
-		order: 30
-	},
-	windows1254: {
-		labelLong: 'Turkish (Windows 1254)',
-		labelShort: 'Windows 1254',
-		order: 31
-	},
-	iso88599: {
-		labelLong: 'Turkish (ISO 8859-9)',
-		labelShort: 'ISO 8859-9',
-		order: 32
-	},
-	windows1258: {
-		labelLong: 'Vietnamese (Windows 1258)',
-		labelShort: 'Windows 1258',
-		order: 33
-	},
-	gbk: {
-		labelLong: 'Simplified Chinese (GBK)',
-		labelShort: 'GBK',
-		order: 34
-	},
-	gb18030: {
-		labelLong: 'Simplified Chinese (GB18030)',
-		labelShort: 'GB18030',
-		order: 35
-	},
-	cp950: {
-		labelLong: 'Traditional Chinese (Big5)',
-		labelShort: 'Big5',
-		order: 36
-	},
-	big5hkscs: {
-		labelLong: 'Traditional Chinese (Big5-HKSCS)',
-		labelShort: 'Big5-HKSCS',
-		order: 37
-	},
-	shiftjis: {
-		labelLong: 'Japanese (Shift JIS)',
-		labelShort: 'Shift JIS',
-		order: 38
-	},
-	eucjp: {
-		labelLong: 'Japanese (EUC-JP)',
-		labelShort: 'EUC-JP',
-		order: 39
-	},
-	euckr: {
-		labelLong: 'Korean (EUC-KR)',
-		labelShort: 'EUC-KR',
-		order: 40
-	},
-	windows874: {
-		labelLong: 'Thai (Windows 874)',
-		labelShort: 'Windows 874',
-		order: 41
-	},
-	iso885911: {
-		labelLong: 'Latin/Thai (ISO 8859-11)',
-		labelShort: 'ISO 8859-11',
-		order: 42
-	},
-	koi8ru: {
-		labelLong: 'Cyrillic (KOI8-RU)',
-		labelShort: 'KOI8-RU',
-		order: 43
-	},
-	koi8t: {
-		labelLong: 'Tajik (KOI8-T)',
-		labelShort: 'KOI8-T',
-		order: 44
-	},
-	gb2312: {
-		labelLong: 'Simplified Chinese (GB 2312)',
-		labelShort: 'GB 2312',
-		order: 45
-	},
-	cp865: {
-		labelLong: 'Nordic DOS (CP 865)',
-		labelShort: 'CP 865',
-		order: 46
-	},
-	cp850: {
-		labelLong: 'Western European DOS (CP 850)',
-		labelShort: 'CP 850',
-		order: 47
-	}
-};
 
 export enum FileKind {
 	FILE,
@@ -1153,32 +809,32 @@ export enum FileKind {
 	ROOT_FOLDER
 }
 
-export const MIN_MAX_MEMORY_SIZE_MB = 2048;
-export const FALLBACK_MAX_MEMORY_SIZE_MB = 4096;
+/**
+ * A hint to disable etag checking for reading/writing.
+ */
+export const ETAG_DISABLED = '';
 
-export function etag(mtime: number, size: number): string;
-export function etag(mtime: number | undefined, size: number | undefined): string | undefined;
-export function etag(mtime: number | undefined, size: number | undefined): string | undefined {
-	if (typeof size !== 'number' || typeof mtime !== 'number') {
+export function etag(stat: { mtime: number, size: number }): string;
+export function etag(stat: { mtime: number | undefined, size: number | undefined }): string | undefined;
+export function etag(stat: { mtime: number | undefined, size: number | undefined }): string | undefined {
+	if (typeof stat.size !== 'number' || typeof stat.mtime !== 'number') {
 		return undefined;
 	}
 
-	return mtime.toString(29) + size.toString(31);
+	return stat.mtime.toString(29) + stat.size.toString(31);
 }
 
 
-// TODO@ben remove traces of legacy file service
-export const ILegacyFileService = createDecorator<ILegacyFileService>('legacyFileService');
-export interface ILegacyFileService extends IDisposable {
-	_serviceBrand: any;
-
-	encoding: IResourceEncodings;
-
-	onAfterOperation: Event<FileOperationEvent>;
-
-	registerProvider(scheme: string, provider: IFileSystemProvider): IDisposable;
-
-	resolveContent(resource: URI, options?: IResolveContentOptions): Promise<IContent>;
-
-	resolveStreamContent(resource: URI, options?: IResolveContentOptions): Promise<IStreamContent>;
+export function whenProviderRegistered(file: URI, fileService: IFileService): Promise<void> {
+	if (fileService.canHandleResource(URI.from({ scheme: file.scheme }))) {
+		return Promise.resolve();
+	}
+	return new Promise((c, e) => {
+		const disposable = fileService.onDidChangeFileSystemProviderRegistrations(e => {
+			if (e.scheme === file.scheme && e.added) {
+				disposable.dispose();
+				c();
+			}
+		});
+	});
 }

@@ -3,11 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-.vs .action-remove-from-recently-opened {
-	background: url("remove.svg") center center no-repeat;
-}
-
-.vs-dark .action-remove-from-recently-opened,
-.hc-black .action-remove-from-recently-opened {
-	background: url("remove-dark.svg") center center no-repeat;
+.monaco-workbench .quick-input-list .quick-input-list-entry.has-actions:hover .quick-input-list-entry-action-bar .action-label.dirty-window::before {
+	content: "\ea76"; /* Close icon flips between black dot and "X" for dirty windows */
 }

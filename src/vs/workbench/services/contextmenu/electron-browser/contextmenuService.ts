@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IAction, IActionRunner, ActionRunner } from 'vs/base/common/actions';
+import { IAction, IActionRunner, ActionRunner, WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification } from 'vs/base/common/actions';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import * as dom from 'vs/base/browser/dom';
 import { IContextMenuService, IContextViewService } from 'vs/platform/contextview/browser/contextView';
@@ -25,10 +25,11 @@ import { IEnvironmentService } from 'vs/platform/environment/common/environment'
 import { ContextMenuService as HTMLContextMenuService } from 'vs/platform/contextview/browser/contextMenuService';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { stripCodicons } from 'vs/base/common/codicons';
 
 export class ContextMenuService extends Disposable implements IContextMenuService {
 
-	_serviceBrand: any;
+	_serviceBrand: undefined;
 
 	get onDidContextMenu(): Event<void> { return this.impl.onDidContextMenu; }
 
@@ -63,10 +64,10 @@ export class ContextMenuService extends Disposable implements IContextMenuServic
 
 class NativeContextMenuService extends Disposable implements IContextMenuService {
 
-	_serviceBrand: any;
+	_serviceBrand: undefined;
 
 	private _onDidContextMenu = this._register(new Emitter<void>());
-	get onDidContextMenu(): Event<void> { return this._onDidContextMenu.event; }
+	readonly onDidContextMenu: Event<void> = this._onDidContextMenu.event;
 
 	constructor(
 		@INotificationService private readonly notificationService: INotificationService,
@@ -91,18 +92,25 @@ class NativeContextMenuService extends Disposable implements IContextMenuService
 			const anchor = delegate.getAnchor();
 			let x: number, y: number;
 
+			let zoom = webFrame.getZoomFactor();
 			if (dom.isHTMLElement(anchor)) {
 				let elementPosition = dom.getDomNodePagePosition(anchor);
 
 				x = elementPosition.left;
 				y = elementPosition.top + elementPosition.height;
+
+				// Shift macOS menus by a few pixels below elements
+				// to account for extra padding on top of native menu
+				// https://github.com/microsoft/vscode/issues/84231
+				if (isMacintosh) {
+					y += 4 / zoom;
+				}
 			} else {
-				const pos = <{ x: number; y: number; }>anchor;
+				const pos: { x: number; y: number; } = anchor;
 				x = pos.x + 1; /* prevent first item from being selected automatically under mouse */
 				y = pos.y;
 			}
 
-			let zoom = webFrame.getZoomFactor();
 			x *= zoom;
 			y *= zoom;
 
@@ -115,7 +123,7 @@ class NativeContextMenuService extends Disposable implements IContextMenuService
 		}
 	}
 
-	private createMenu(delegate: IContextMenuDelegate, entries: Array<IAction | ContextSubMenu>, onHide: () => void): IContextMenuItem[] {
+	private createMenu(delegate: IContextMenuDelegate, entries: ReadonlyArray<IAction | ContextSubMenu>, onHide: () => void): IContextMenuItem[] {
 		const actionRunner = delegate.actionRunner || new ActionRunner();
 
 		return entries.map(entry => this.createMenuItem(delegate, entry, actionRunner, onHide));
@@ -131,17 +139,26 @@ class NativeContextMenuService extends Disposable implements IContextMenuService
 		// Submenu
 		if (entry instanceof ContextSubMenu) {
 			return {
-				label: unmnemonicLabel(entry.label),
+				label: unmnemonicLabel(stripCodicons(entry.label)).trim(),
 				submenu: this.createMenu(delegate, entry.entries, onHide)
 			};
 		}
 
 		// Normal Menu Item
 		else {
+			let type: 'radio' | 'checkbox' | undefined = undefined;
+			if (!!entry.checked) {
+				if (typeof delegate.getCheckedActionsRepresentation === 'function') {
+					type = delegate.getCheckedActionsRepresentation(entry);
+				} else {
+					type = 'checkbox';
+				}
+			}
+
 			const item: IContextMenuItem = {
-				label: unmnemonicLabel(entry.label),
-				checked: !!entry.checked || !!entry.radio,
-				type: !!entry.checked ? 'checkbox' : !!entry.radio ? 'radio' : undefined,
+				label: unmnemonicLabel(stripCodicons(entry.label)).trim(),
+				checked: !!entry.checked,
+				type,
 				enabled: !!entry.enabled,
 				click: event => {
 
@@ -172,19 +189,19 @@ class NativeContextMenuService extends Disposable implements IContextMenuService
 		}
 	}
 
-	private runAction(actionRunner: IActionRunner, actionToRun: IAction, delegate: IContextMenuDelegate, event: IContextMenuEvent): void {
-		/* __GDPR__
-			"workbenchActionExecuted" : {
-				"id" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
-				"from": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+	private async runAction(actionRunner: IActionRunner, actionToRun: IAction, delegate: IContextMenuDelegate, event: IContextMenuEvent): Promise<void> {
+		this.telemetryService.publicLog2<WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification>('workbenchActionExecuted', { id: actionToRun.id, from: 'contextMenu' });
+
+		const context = delegate.getActionsContext ? delegate.getActionsContext(event) : undefined;
+
+		const runnable = actionRunner.run(actionToRun, context);
+		if (runnable) {
+			try {
+				await runnable;
+			} catch (error) {
+				this.notificationService.error(error);
 			}
-		*/
-		this.telemetryService.publicLog('workbenchActionExecuted', { id: actionToRun.id, from: 'contextMenu' });
-
-		const context = delegate.getActionsContext ? delegate.getActionsContext(event) : event;
-		const res = actionRunner.run(actionToRun, context) || Promise.resolve(null);
-
-		res.then(undefined, e => this.notificationService.error(e));
+		}
 	}
 }
 

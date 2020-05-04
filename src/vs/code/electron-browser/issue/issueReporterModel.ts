@@ -4,8 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { assign } from 'vs/base/common/objects';
-import { IssueType, ISettingSearchResult, IssueReporterExtensionData } from 'vs/platform/issue/common/issue';
-import { SystemInfo } from 'vs/platform/diagnostics/common/diagnosticsService';
+import { IssueType, ISettingSearchResult, IssueReporterExtensionData } from 'vs/platform/issue/node/issue';
+import { SystemInfo, isRemoteDiagnosticError } from 'vs/platform/diagnostics/common/diagnostics';
 
 export interface IssueReporterData {
 	issueType: IssueType;
@@ -75,7 +75,8 @@ ${this.getInfos()}
 
 	private getRemoteOSes(): string {
 		if (this._data.systemInfo && this._data.systemInfo.remoteData.length) {
-			return this._data.systemInfo.remoteData.map(remote => `Remote OS version: ${remote.machineInfo.os}`).join('\n') + '\n';
+			return this._data.systemInfo.remoteData
+				.map(remote => isRemoteDiagnosticError(remote) ? remote.errorMessage : `Remote OS version: ${remote.machineInfo.os}`).join('\n') + '\n';
 		}
 
 		return '';
@@ -167,8 +168,18 @@ ${this.getInfos()}
 |Screen Reader|${this._data.systemInfo.screenReader}|
 |VM|${this._data.systemInfo.vmHint}|`;
 
+			if (this._data.systemInfo.linuxEnv) {
+				md += `\n|DESKTOP_SESSION|${this._data.systemInfo.linuxEnv.desktopSession}|
+|XDG_CURRENT_DESKTOP|${this._data.systemInfo.linuxEnv.xdgCurrentDesktop}|
+|XDG_SESSION_DESKTOP|${this._data.systemInfo.linuxEnv.xdgSessionDesktop}|
+|XDG_SESSION_TYPE|${this._data.systemInfo.linuxEnv.xdgSessionType}|`;
+			}
+
 			this._data.systemInfo.remoteData.forEach(remote => {
-				md += `
+				if (isRemoteDiagnosticError(remote)) {
+					md += `\n\n${remote.errorMessage}`;
+				} else {
+					md += `
 
 |Item|Value|
 |---|---|
@@ -177,6 +188,7 @@ ${this.getInfos()}
 |CPUs|${remote.machineInfo.cpus}|
 |Memory (System)|${remote.machineInfo.memory}|
 |VM|${remote.machineInfo.vmHint}|`;
+				}
 			});
 		}
 

@@ -3,15 +3,21 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-declare var Buffer: any;
-export const hasBuffer = (typeof Buffer !== 'undefined');
+import * as strings from 'vs/base/common/strings';
+import * as streams from 'vs/base/common/stream';
+
+declare const Buffer: any;
+
+const hasBuffer = (typeof Buffer !== 'undefined');
+const hasTextEncoder = (typeof TextEncoder !== 'undefined');
+const hasTextDecoder = (typeof TextDecoder !== 'undefined');
 
 let textEncoder: TextEncoder | null;
 let textDecoder: TextDecoder | null;
 
 export class VSBuffer {
 
-	public static alloc(byteLength: number): VSBuffer {
+	static alloc(byteLength: number): VSBuffer {
 		if (hasBuffer) {
 			return new VSBuffer(Buffer.allocUnsafe(byteLength));
 		} else {
@@ -19,7 +25,7 @@ export class VSBuffer {
 		}
 	}
 
-	public static wrap(actual: Uint8Array): VSBuffer {
+	static wrap(actual: Uint8Array): VSBuffer {
 		if (hasBuffer && !(Buffer.isBuffer(actual))) {
 			// https://nodejs.org/dist/latest-v10.x/docs/api/buffer.html#buffer_class_method_buffer_from_arraybuffer_byteoffset_length
 			// Create a zero-copy Buffer wrapper around the ArrayBuffer pointed to by the Uint8Array
@@ -28,18 +34,20 @@ export class VSBuffer {
 		return new VSBuffer(actual);
 	}
 
-	public static fromString(source: string): VSBuffer {
+	static fromString(source: string): VSBuffer {
 		if (hasBuffer) {
 			return new VSBuffer(Buffer.from(source));
-		} else {
+		} else if (hasTextEncoder) {
 			if (!textEncoder) {
 				textEncoder = new TextEncoder();
 			}
 			return new VSBuffer(textEncoder.encode(source));
+		} else {
+			return new VSBuffer(strings.encodeUTF8(source));
 		}
 	}
 
-	public static concat(buffers: VSBuffer[], totalLength?: number): VSBuffer {
+	static concat(buffers: VSBuffer[], totalLength?: number): VSBuffer {
 		if (typeof totalLength === 'undefined') {
 			totalLength = 0;
 			for (let i = 0, len = buffers.length; i < len; i++) {
@@ -58,52 +66,83 @@ export class VSBuffer {
 		return ret;
 	}
 
-	public readonly buffer: Uint8Array;
-	public readonly byteLength: number;
+	readonly buffer: Uint8Array;
+	readonly byteLength: number;
 
 	private constructor(buffer: Uint8Array) {
 		this.buffer = buffer;
 		this.byteLength = this.buffer.byteLength;
 	}
 
-	public toString(): string {
+	toString(): string {
 		if (hasBuffer) {
 			return this.buffer.toString();
-		} else {
+		} else if (hasTextDecoder) {
 			if (!textDecoder) {
 				textDecoder = new TextDecoder();
 			}
 			return textDecoder.decode(this.buffer);
+		} else {
+			return strings.decodeUTF8(this.buffer);
 		}
 	}
 
-	public slice(start?: number, end?: number): VSBuffer {
-		return new VSBuffer(this.buffer.slice(start, end));
+	slice(start?: number, end?: number): VSBuffer {
+		// IMPORTANT: use subarray instead of slice because TypedArray#slice
+		// creates shallow copy and NodeBuffer#slice doesn't. The use of subarray
+		// ensures the same, performant, behaviour.
+		return new VSBuffer(this.buffer.subarray(start!/*bad lib.d.ts*/, end));
 	}
 
-	public set(array: VSBuffer, offset?: number): void {
-		this.buffer.set(array.buffer, offset);
+	set(array: VSBuffer, offset?: number): void;
+	set(array: Uint8Array, offset?: number): void;
+	set(array: VSBuffer | Uint8Array, offset?: number): void {
+		if (array instanceof VSBuffer) {
+			this.buffer.set(array.buffer, offset);
+		} else {
+			this.buffer.set(array, offset);
+		}
 	}
 
-	public readUint32BE(offset: number): number {
-		return readUint32BE(this.buffer, offset);
+	readUInt32BE(offset: number): number {
+		return readUInt32BE(this.buffer, offset);
 	}
 
-	public writeUint32BE(value: number, offset: number): void {
-		writeUint32BE(this.buffer, value, offset);
+	writeUInt32BE(value: number, offset: number): void {
+		writeUInt32BE(this.buffer, value, offset);
 	}
 
-	public readUint8(offset: number): number {
-		return readUint8(this.buffer, offset);
+	readUInt32LE(offset: number): number {
+		return readUInt32LE(this.buffer, offset);
 	}
 
-	public writeUint8(value: number, offset: number): void {
-		writeUint8(this.buffer, value, offset);
+	writeUInt32LE(value: number, offset: number): void {
+		writeUInt32LE(this.buffer, value, offset);
 	}
 
+	readUInt8(offset: number): number {
+		return readUInt8(this.buffer, offset);
+	}
+
+	writeUInt8(value: number, offset: number): void {
+		writeUInt8(this.buffer, value, offset);
+	}
 }
 
-function readUint32BE(source: Uint8Array, offset: number): number {
+export function readUInt16LE(source: Uint8Array, offset: number): number {
+	return (
+		((source[offset + 0] << 0) >>> 0) |
+		((source[offset + 1] << 8) >>> 0)
+	);
+}
+
+export function writeUInt16LE(destination: Uint8Array, value: number, offset: number): void {
+	destination[offset + 0] = (value & 0b11111111);
+	value = value >>> 8;
+	destination[offset + 1] = (value & 0b11111111);
+}
+
+export function readUInt32BE(source: Uint8Array, offset: number): number {
 	return (
 		source[offset] * 2 ** 24
 		+ source[offset + 1] * 2 ** 16
@@ -112,7 +151,7 @@ function readUint32BE(source: Uint8Array, offset: number): number {
 	);
 }
 
-function writeUint32BE(destination: Uint8Array, value: number, offset: number): void {
+export function writeUInt32BE(destination: Uint8Array, value: number, offset: number): void {
 	destination[offset + 3] = value;
 	value = value >>> 8;
 	destination[offset + 2] = value;
@@ -122,51 +161,59 @@ function writeUint32BE(destination: Uint8Array, value: number, offset: number): 
 	destination[offset] = value;
 }
 
-function readUint8(source: Uint8Array, offset: number): number {
+export function readUInt32LE(source: Uint8Array, offset: number): number {
+	return (
+		((source[offset + 0] << 0) >>> 0) |
+		((source[offset + 1] << 8) >>> 0) |
+		((source[offset + 2] << 16) >>> 0) |
+		((source[offset + 3] << 24) >>> 0)
+	);
+}
+
+export function writeUInt32LE(destination: Uint8Array, value: number, offset: number): void {
+	destination[offset + 0] = (value & 0b11111111);
+	value = value >>> 8;
+	destination[offset + 1] = (value & 0b11111111);
+	value = value >>> 8;
+	destination[offset + 2] = (value & 0b11111111);
+	value = value >>> 8;
+	destination[offset + 3] = (value & 0b11111111);
+}
+
+export function readUInt8(source: Uint8Array, offset: number): number {
 	return source[offset];
 }
 
-function writeUint8(destination: Uint8Array, value: number, offset: number): void {
+export function writeUInt8(destination: Uint8Array, value: number, offset: number): void {
 	destination[offset] = value;
 }
 
-export interface VSBufferReadable {
+export interface VSBufferReadable extends streams.Readable<VSBuffer> { }
 
-	/**
-	 * Read data from the underlying source. Will return
-	 * null to indicate that no more data can be read.
-	 */
-	read(): VSBuffer | null;
-}
+export interface VSBufferReadableStream extends streams.ReadableStream<VSBuffer> { }
 
-/**
- * Helper to fully read a VSBuffer readable into a single buffer.
- */
+export interface VSBufferWriteableStream extends streams.WriteableStream<VSBuffer> { }
+
 export function readableToBuffer(readable: VSBufferReadable): VSBuffer {
-	const chunks: VSBuffer[] = [];
-
-	let chunk: VSBuffer | null;
-	while (chunk = readable.read()) {
-		chunks.push(chunk);
-	}
-
-	return VSBuffer.concat(chunks);
+	return streams.consumeReadable<VSBuffer>(readable, chunks => VSBuffer.concat(chunks));
 }
 
-/**
- * Helper to convert a buffer into a readable buffer.
- */
 export function bufferToReadable(buffer: VSBuffer): VSBufferReadable {
-	let done = false;
-	return {
-		read: () => {
-			if (done) {
-				return null;
-			}
+	return streams.toReadable<VSBuffer>(buffer);
+}
 
-			done = true;
+export function streamToBuffer(stream: streams.ReadableStream<VSBuffer>): Promise<VSBuffer> {
+	return streams.consumeStream<VSBuffer>(stream, chunks => VSBuffer.concat(chunks));
+}
 
-			return buffer;
-		}
-	};
+export function bufferToStream(buffer: VSBuffer): streams.ReadableStream<VSBuffer> {
+	return streams.toStream<VSBuffer>(buffer, chunks => VSBuffer.concat(chunks));
+}
+
+export function streamToBufferReadableStream(stream: streams.ReadableStreamEvents<Uint8Array | string>): streams.ReadableStream<VSBuffer> {
+	return streams.transform<Uint8Array | string, VSBuffer>(stream, { data: data => typeof data === 'string' ? VSBuffer.fromString(data) : VSBuffer.wrap(data) }, chunks => VSBuffer.concat(chunks));
+}
+
+export function newWriteableBufferStream(): streams.WriteableStream<VSBuffer> {
+	return streams.newWriteableStream<VSBuffer>(chunks => VSBuffer.concat(chunks));
 }

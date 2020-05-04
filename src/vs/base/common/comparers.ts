@@ -3,32 +3,29 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as strings from 'vs/base/common/strings';
 import { sep } from 'vs/base/common/path';
 import { IdleValue } from 'vs/base/common/async';
 
-let intlFileNameCollator: IdleValue<{ collator: Intl.Collator, collatorIsNumeric: boolean }>;
-
-export function setFileNameComparer(collator: IdleValue<{ collator: Intl.Collator, collatorIsNumeric: boolean }>): void {
-	intlFileNameCollator = collator;
-}
+const intlFileNameCollator: IdleValue<{ collator: Intl.Collator, collatorIsNumeric: boolean }> = new IdleValue(() => {
+	const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+	return {
+		collator: collator,
+		collatorIsNumeric: collator.resolvedOptions().numeric
+	};
+});
 
 export function compareFileNames(one: string | null, other: string | null, caseSensitive = false): number {
-	if (intlFileNameCollator) {
-		const a = one || '';
-		const b = other || '';
-		const result = intlFileNameCollator.getValue().collator.compare(a, b);
+	const a = one || '';
+	const b = other || '';
+	const result = intlFileNameCollator.getValue().collator.compare(a, b);
 
-		// Using the numeric option in the collator will
-		// make compare(`foo1`, `foo01`) === 0. We must disambiguate.
-		if (intlFileNameCollator.getValue().collatorIsNumeric && result === 0 && a !== b) {
-			return a < b ? -1 : 1;
-		}
-
-		return result;
+	// Using the numeric option in the collator will
+	// make compare(`foo1`, `foo01`) === 0. We must disambiguate.
+	if (intlFileNameCollator.getValue().collatorIsNumeric && result === 0 && a !== b) {
+		return a < b ? -1 : 1;
 	}
 
-	return noIntlCompareFileNames(one, other, caseSensitive);
+	return result;
 }
 
 const FileNameMatch = /^(.*?)(\.([^.]*))?$/;
@@ -54,46 +51,27 @@ export function noIntlCompareFileNames(one: string | null, other: string | null,
 }
 
 export function compareFileExtensions(one: string | null, other: string | null): number {
-	if (intlFileNameCollator) {
-		const [oneName, oneExtension] = extractNameAndExtension(one);
-		const [otherName, otherExtension] = extractNameAndExtension(other);
+	const [oneName, oneExtension] = extractNameAndExtension(one);
+	const [otherName, otherExtension] = extractNameAndExtension(other);
 
-		let result = intlFileNameCollator.getValue().collator.compare(oneExtension, otherExtension);
+	let result = intlFileNameCollator.getValue().collator.compare(oneExtension, otherExtension);
 
-		if (result === 0) {
-			// Using the numeric option in the collator will
-			// make compare(`foo1`, `foo01`) === 0. We must disambiguate.
-			if (intlFileNameCollator.getValue().collatorIsNumeric && oneExtension !== otherExtension) {
-				return oneExtension < otherExtension ? -1 : 1;
-			}
-
-			// Extensions are equal, compare filenames
-			result = intlFileNameCollator.getValue().collator.compare(oneName, otherName);
-
-			if (intlFileNameCollator.getValue().collatorIsNumeric && result === 0 && oneName !== otherName) {
-				return oneName < otherName ? -1 : 1;
-			}
+	if (result === 0) {
+		// Using the numeric option in the collator will
+		// make compare(`foo1`, `foo01`) === 0. We must disambiguate.
+		if (intlFileNameCollator.getValue().collatorIsNumeric && oneExtension !== otherExtension) {
+			return oneExtension < otherExtension ? -1 : 1;
 		}
 
-		return result;
+		// Extensions are equal, compare filenames
+		result = intlFileNameCollator.getValue().collator.compare(oneName, otherName);
+
+		if (intlFileNameCollator.getValue().collatorIsNumeric && result === 0 && oneName !== otherName) {
+			return oneName < otherName ? -1 : 1;
+		}
 	}
 
-	return noIntlCompareFileExtensions(one, other);
-}
-
-function noIntlCompareFileExtensions(one: string | null, other: string | null): number {
-	const [oneName, oneExtension] = extractNameAndExtension(one && one.toLowerCase());
-	const [otherName, otherExtension] = extractNameAndExtension(other && other.toLowerCase());
-
-	if (oneExtension !== otherExtension) {
-		return oneExtension < otherExtension ? -1 : 1;
-	}
-
-	if (oneName === otherName) {
-		return 0;
-	}
-
-	return oneName < otherName ? -1 : 1;
+	return result;
 }
 
 function extractNameAndExtension(str?: string | null): [string, string] {
@@ -154,8 +132,8 @@ export function compareAnything(one: string, other: string, lookFor: string): nu
 	}
 
 	// Sort suffix matches over non suffix matches
-	const elementASuffixMatch = strings.endsWith(elementAName, lookFor);
-	const elementBSuffixMatch = strings.endsWith(elementBName, lookFor);
+	const elementASuffixMatch = elementAName.endsWith(lookFor);
+	const elementBSuffixMatch = elementBName.endsWith(lookFor);
 	if (elementASuffixMatch !== elementBSuffixMatch) {
 		return elementASuffixMatch ? -1 : 1;
 	}
@@ -175,8 +153,8 @@ export function compareByPrefix(one: string, other: string, lookFor: string): nu
 	const elementBName = other.toLowerCase();
 
 	// Sort prefix matches over non prefix matches
-	const elementAPrefixMatch = strings.startsWith(elementAName, lookFor);
-	const elementBPrefixMatch = strings.startsWith(elementBName, lookFor);
+	const elementAPrefixMatch = elementAName.startsWith(lookFor);
+	const elementBPrefixMatch = elementBName.startsWith(lookFor);
 	if (elementAPrefixMatch !== elementBPrefixMatch) {
 		return elementAPrefixMatch ? -1 : 1;
 	}

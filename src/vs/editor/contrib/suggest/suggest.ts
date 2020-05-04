@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { first } from 'vs/base/common/async';
-import { assign } from 'vs/base/common/objects';
 import { onUnexpectedExternalError, canceled, isPromiseCanceledError } from 'vs/base/common/errors';
 import { IEditorContribution } from 'vs/editor/common/editorCommon';
 import { ITextModel } from 'vs/editor/common/model';
@@ -16,19 +15,38 @@ import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { Range } from 'vs/editor/common/core/range';
 import { FuzzyScore } from 'vs/base/common/filters';
+import { isDisposable, DisposableStore } from 'vs/base/common/lifecycle';
+import { MenuId } from 'vs/platform/actions/common/actions';
 
 export const Context = {
 	Visible: new RawContextKey<boolean>('suggestWidgetVisible', false),
+	DetailsVisible: new RawContextKey<boolean>('suggestWidgetDetailsVisible', false),
 	MultipleSuggestions: new RawContextKey<boolean>('suggestWidgetMultipleSuggestions', false),
 	MakesTextEdit: new RawContextKey('suggestionMakesTextEdit', true),
-	AcceptSuggestionsOnEnter: new RawContextKey<boolean>('acceptSuggestionOnEnter', true)
+	AcceptSuggestionsOnEnter: new RawContextKey<boolean>('acceptSuggestionOnEnter', true),
+	HasInsertAndReplaceRange: new RawContextKey('suggestionHasInsertAndReplaceRange', false),
+	CanResolve: new RawContextKey('suggestionCanResolve', false),
 };
+
+export const suggestWidgetStatusbarMenu = new MenuId('suggestWidgetStatusBar');
 
 export class CompletionItem {
 
-	_brand: 'ISuggestionItem';
+	_brand!: 'ISuggestionItem';
+
+	private static readonly _defaultResolve = () => Promise.resolve();
 
 	readonly resolve: (token: CancellationToken) => Promise<void>;
+	isResolved: boolean = false;
+
+
+	//
+	readonly editStart: IPosition;
+	readonly editInsertEnd: IPosition;
+	readonly editReplaceEnd: IPosition;
+
+	//
+	readonly textLabel: string;
 
 	// perf
 	readonly labelLow: string;
@@ -48,23 +66,39 @@ export class CompletionItem {
 		readonly provider: modes.CompletionItemProvider,
 		model: ITextModel
 	) {
+		this.textLabel = typeof completion.label === 'string'
+			? completion.label
+			: completion.label.name;
+
 		// ensure lower-variants (perf)
-		this.labelLow = completion.label.toLowerCase();
+		this.labelLow = this.textLabel.toLowerCase();
+
 		this.sortTextLow = completion.sortText && completion.sortText.toLowerCase();
 		this.filterTextLow = completion.filterText && completion.filterText.toLowerCase();
+
+		// normalize ranges
+		if (Range.isIRange(completion.range)) {
+			this.editStart = new Position(completion.range.startLineNumber, completion.range.startColumn);
+			this.editInsertEnd = new Position(completion.range.endLineNumber, completion.range.endColumn);
+			this.editReplaceEnd = new Position(completion.range.endLineNumber, completion.range.endColumn);
+		} else {
+			this.editStart = new Position(completion.range.insert.startLineNumber, completion.range.insert.startColumn);
+			this.editInsertEnd = new Position(completion.range.insert.endLineNumber, completion.range.insert.endColumn);
+			this.editReplaceEnd = new Position(completion.range.replace.endLineNumber, completion.range.replace.endColumn);
+		}
 
 		// create the suggestion resolver
 		const { resolveCompletionItem } = provider;
 		if (typeof resolveCompletionItem !== 'function') {
-			this.resolve = () => Promise.resolve();
+			this.resolve = CompletionItem._defaultResolve;
+			this.isResolved = true;
 		} else {
 			let cached: Promise<void> | undefined;
 			this.resolve = (token) => {
 				if (!cached) {
-					let isDone = false;
-					cached = Promise.resolve(resolveCompletionItem.call(provider, model, position, completion, token)).then(value => {
-						assign(completion, value);
-						isDone = true;
+					cached = Promise.resolve(resolveCompletionItem.call(provider, model, Position.lift(position), completion, token)).then(value => {
+						Object.assign(completion, value);
+						this.isResolved = true;
 					}, err => {
 						if (isPromiseCanceledError(err)) {
 							// the IPC queue will reject the request with the
@@ -73,7 +107,7 @@ export class CompletionItem {
 						}
 					});
 					token.onCancellationRequested(() => {
-						if (!isDone) {
+						if (!this.isResolved) {
 							// cancellation after the request has been
 							// dispatched -> reset cache
 							cached = undefined;
@@ -121,9 +155,12 @@ export function provideSuggestionItems(
 	token: CancellationToken = CancellationToken.None
 ): Promise<CompletionItem[]> {
 
-	const allSuggestions: CompletionItem[] = [];
-	const wordUntil = model.getWordUntilPosition(position);
-	const defaultRange = new Range(position.lineNumber, wordUntil.startColumn, position.lineNumber, wordUntil.endColumn);
+	const word = model.getWordAtPosition(position);
+	const defaultReplaceRange = word ? new Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn) : Range.fromPositions(position);
+	const defaultInsertRange = defaultReplaceRange.setEndPosition(position.lineNumber, position.column);
+
+	// const wordUntil = model.getWordUntilPosition(position);
+	// const defaultRange = new Range(position.lineNumber, wordUntil.startColumn, position.lineNumber, wordUntil.endColumn);
 
 	position = position.clone();
 
@@ -135,9 +172,12 @@ export function provideSuggestionItems(
 		supports.unshift([_snippetSuggestSupport]);
 	}
 
+	const allSuggestions: CompletionItem[] = [];
+	const disposables = new DisposableStore();
+	let hasResult = false;
+
 	// add suggestions from contributed providers - providers are ordered in groups of
 	// equal score and once a group produces a result the process stops
-	let hasResult = false;
 	const factory = supports.map(supports => () => {
 		// for each support in the group ask for suggestions
 		return Promise.all(supports.map(provider => {
@@ -156,11 +196,18 @@ export function provideSuggestionItems(
 
 							// fill in default range when missing
 							if (!suggestion.range) {
-								suggestion.range = defaultRange;
+								suggestion.range = { insert: defaultInsertRange, replace: defaultReplaceRange };
+							}
+							// fill in default sortText when missing
+							if (!suggestion.sortText) {
+								suggestion.sortText = typeof suggestion.label === 'string' ? suggestion.label : suggestion.label.name;
 							}
 
 							allSuggestions.push(new CompletionItem(position, suggestion, container, provider, model));
 						}
+					}
+					if (isDisposable(container)) {
+						disposables.add(container);
 					}
 				}
 
@@ -177,6 +224,7 @@ export function provideSuggestionItems(
 		return hasResult || token.isCancellationRequested;
 	}).then(() => {
 		if (token.isCancellationRequested) {
+			disposables.dispose();
 			return Promise.reject<any>(canceled());
 		}
 		return allSuggestions.sort(getSuggestionComparator(options.snippetSortOrder));
@@ -244,29 +292,35 @@ export function getSuggestionComparator(snippetConfig: SnippetSortOrder): (a: Co
 	return _snippetComparators.get(snippetConfig)!;
 }
 
-registerDefaultLanguageCommand('_executeCompletionItemProvider', (model, position, args) => {
+registerDefaultLanguageCommand('_executeCompletionItemProvider', async (model, position, args) => {
 
 	const result: modes.CompletionList = {
 		incomplete: false,
 		suggestions: []
 	};
 
-	let resolving: Promise<any>[] = [];
-	let maxItemsToResolve = args['maxItemsToResolve'] || 0;
+	const disposables = new DisposableStore();
+	const resolving: Promise<any>[] = [];
+	const maxItemsToResolve = args['maxItemsToResolve'] || 0;
 
-	return provideSuggestionItems(model, position).then(items => {
-		for (const item of items) {
-			if (resolving.length < maxItemsToResolve) {
-				resolving.push(item.resolve(CancellationToken.None));
-			}
-			result.incomplete = result.incomplete || item.container.incomplete;
-			result.suggestions.push(item.completion);
+	const items = await provideSuggestionItems(model, position);
+	for (const item of items) {
+		if (resolving.length < maxItemsToResolve) {
+			resolving.push(item.resolve(CancellationToken.None));
 		}
-	}).then(() => {
-		return Promise.all(resolving);
-	}).then(() => {
+		result.incomplete = result.incomplete || item.container.incomplete;
+		result.suggestions.push(item.completion);
+		if (isDisposable(item.container)) {
+			disposables.add(item.container);
+		}
+	}
+
+	try {
+		await Promise.all(resolving);
 		return result;
-	});
+	} finally {
+		setTimeout(() => disposables.dispose(), 100);
+	}
 });
 
 interface SuggestController extends IEditorContribution {

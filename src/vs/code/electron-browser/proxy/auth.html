@@ -4,6 +4,8 @@
 
 <head>
 	<meta charset="utf-8" />
+	<meta http-equiv="Content-Security-Policy"
+		content="default-src 'none'; img-src 'self' https: data:; media-src 'none'; child-src 'self'; object-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; font-src 'self' https:;">
 	<style>
 		html,
 		body {
@@ -12,8 +14,6 @@
 			height: 100%;
 			width: 100%;
 			overflow: hidden;
-			-webkit-touch-callout: none;
-			-webkit-user-select: none;
 			user-select: none;
 		}
 
@@ -68,8 +68,8 @@
 	<section id="main">
 		<p id="message"></p>
 		<form id="form">
-			<p><input type="text" id="username" placeholder="Username" required/></p>
-			<p><input type="password" id="password" placeholder="Password" required/></p>
+			<p><input type="text" id="username" placeholder="Username" required /></p>
+			<p><input type="password" id="password" placeholder="Password" required /></p>
 			<p id="buttons">
 				<input id="ok" type="submit" value="OK" />
 				<input id="cancel" type="button" value="Cancel" />
